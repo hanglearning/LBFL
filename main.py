@@ -73,15 +73,13 @@ parser.add_argument('--n_samples', type=int, default=20)
 parser.add_argument('--n_classes', type=int, default=3)
 parser.add_argument('--n_malicious', type=int, default=8, help="number of malicious nodes in the network")
 
-parser.add_argument('--noise_variance', type=int, default=1, help="noise variance level of the injected Gaussian Noise")
-
 ####################### validation and rewards setting #######################
 parser.add_argument('--pass_all_models', type=int, default=0, help='turn off validation and pass all models, used for debug or create baselines')
-parser.add_argument('--validate_center_threshold', type=float, default=0.1, help='only recognize malicious devices if the difference of two centers of KMeans exceed this threshold')
-parser.add_argument('--inverse_acc_weights', type=int, default=0, help='sometimes may inverse the accuracy weights to give more weights to minority workers. ideally, malicious workers should have been filtered out and not be considered here')
 
 ####################### attack setting #######################
 parser.add_argument('--attack_type', type=int, default=0, help='0 - no attack, 1 - model poisoning attack, 2 - label flipping attack, 3 - lazy attack')
+parser.add_argument('--noise_variance', type=int, default=1, help="noise variance level of the injected Gaussian Noise. Need attack_type=1")
+parser.add_argument('--lazy_variance', type=float, default=0.1, help="This number would be multiplied by the number of epochs to determine the number of max epochs for lazy devices to train. Need attack_type=3")
 
 ####################### pruning setting #######################
 parser.add_argument('--rewind', type=int, default=1, help="reinit ticket model parameters before training")
@@ -206,7 +204,9 @@ def main():
     logger['malicious_winning_count'] = {r: 0 for r in range(1, args.rounds + 1)}
 
     logger["pos_book"] = {r: {} for r in range(1, args.rounds + 1)}
-    
+    logger["euc_dis_local"] = {r: {} for r in range(1, args.rounds + 1)}
+    logger["euc_dis_global"] = {r: {} for r in range(1, args.rounds + 1)}
+
     # save args
     with open(f'{args.log_dir}/args.pickle', 'wb') as f:
         pickle.dump(args, f)
@@ -249,8 +249,10 @@ def main():
             device.produced_block = None 
             device.worker_to_model_sig = {}           
             device.worker_to_acc = {}
+            device.worker_to_norm = {}
+            device.worker_to_norm_global = {}
             device._device_to_ungranted_reward = defaultdict(float)
-            device.worker_to_acc_weight = {}
+            device.worker_to_model_weight = {}
             
         ''' Device Starts LBFL '''
 
@@ -383,7 +385,17 @@ def main():
             pickle.dump(logger, f)
 
         # generate heatmap for the pos book
-        plot_pos_book(logger["pos_book"], args.log_dir, comm_round, plot_diff=True)
+        # plot_heat_map(logger["pos_book"], args.log_dir, comm_round, "pos_book", plot_diff=True)
+
+        ### record cos sim values ###
+        for device in devices_list:
+            logger["euc_dis_local"][comm_round][device.idx] = deepcopy(device.worker_to_norm)
+            logger["euc_dis_global"][comm_round][device.idx] = deepcopy(device.worker_to_norm_global)
+
+        # generate heatmap for the cos sim values
+        plot_heat_map(logger["euc_dis_local"], args.log_dir, comm_round, "euc_dis_local", plot_diff=False)
+        plot_heat_map(logger["euc_dis_global"], args.log_dir, comm_round, "euc_dis_global", plot_diff=False)
+
 
 if __name__ == "__main__":
     main()

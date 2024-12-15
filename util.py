@@ -265,6 +265,41 @@ def train(
 
 	torch.set_grad_enabled(False)
 
+def get_gradient_norm(
+	model: nn.Module,
+	train_dataloader: DataLoader,
+	optimizer_type: str,
+	lr: float = 1e-3,
+	device: str = 'cuda:0',
+	verbose=True
+) -> Dict[str, torch.Tensor]:
+
+	if optimizer_type == "Adam":
+		optimizer = torch.optim.Adam(lr=lr, params=model.parameters(), weight_decay=1e-4)
+	elif optimizer_type == "SGD":
+		optimizer = torch.optim.SGD(lr=lr, params=model.parameters(), momentum=0.5)
+	model.train(True)
+	torch.set_grad_enabled(True)
+
+	criterion = nn.NLLLoss().to(device)
+	
+	# We'll just inspect the gradient after the first batch to illustrate
+	for batch_idx, (images, labels) in enumerate(train_dataloader):
+		images, labels = images.to(device), labels.to(device)
+		model.zero_grad()
+		log_probs = model(images)
+		loss = criterion(log_probs, labels)
+		loss.backward()
+		
+		# At this point, gradients are computed.
+		# Let's print out the gradient norms of each parameter group as an example.
+		total_grad_norm = 0.0
+		for name, param in model.named_parameters():
+			if param.grad is not None:
+				total_grad_norm += param.grad.data.norm(2).item() ** 2
+		total_grad_norm = total_grad_norm ** 0.5
+	return total_grad_norm
+
 
 @ torch.no_grad()
 def test_by_data_set(
@@ -527,27 +562,28 @@ def what_samples(dataloader):
 	print("Total count", total)
 
 def subtract_nested_dicts(dict1, dict2):
-    # Get all unique keys from both outer dictionaries
-    outer_keys = set(dict1.keys()).union(set(dict2.keys()))
-    
-    result = {}
-    for outer_key in outer_keys:
-        result[outer_key] = {}
-        # Get all unique keys from both inner dictionaries
-        inner_keys = set(dict1.get(outer_key, {}).keys()).union(set(dict2.get(outer_key, {}).keys()))
-        for inner_key in inner_keys:
-            result[outer_key][inner_key] = dict1.get(outer_key, {}).get(inner_key, 0) - dict2.get(outer_key, {}).get(inner_key, 0)
-    
-    return result
+	# Get all unique keys from both outer dictionaries
+	outer_keys = set(dict1.keys()).union(set(dict2.keys()))
+	
+	result = {}
+	for outer_key in outer_keys:
+		result[outer_key] = {}
+		# Get all unique keys from both inner dictionaries
+		inner_keys = set(dict1.get(outer_key, {}).keys()).union(set(dict2.get(outer_key, {}).keys()))
+		for inner_key in inner_keys:
+			result[outer_key][inner_key] = dict1.get(outer_key, {}).get(inner_key, 0) - dict2.get(outer_key, {}).get(inner_key, 0)
+	
+	return result
 
-def plot_pos_book(pos_book, log_dir, comm_round, plot_diff=True):
+def plot_heat_map(pos_book, log_dir, comm_round, plot_name, plot_diff=True):
 	'''
 		Debug the rewarding function to see if it rewards more to the 
 		legitimates and less to the maliciouses.
 		If not plot_diff, plot the current pos_book.
 	'''
-	os.makedirs(f'{log_dir}/pos_heat_maps/', exist_ok=True)
+	os.makedirs(f'{log_dir}/{plot_name}_heat_maps/', exist_ok=True)
 	cur_pos_book = pos_book[comm_round]
+	cur_pos_book = {k: v for k, v in cur_pos_book.items() if v}
 	if plot_diff and comm_round > 1:
 		# Get the previous pos_book
 		prev_pos_book = pos_book[comm_round - 1]
@@ -568,6 +604,6 @@ def plot_pos_book(pos_book, log_dir, comm_round, plot_diff=True):
 	# Add labels and title
 	plt.xlabel('Book Owner ID')
 	plt.ylabel('Device ID')
-	plt.title('POS Heat Map')
+	plt.title(f'{plot_name} Heat Map')
 
-	plt.savefig(f'{log_dir}/pos_heat_maps/pos_heat_map_round_{comm_round}.png')
+	plt.savefig(f'{log_dir}/{plot_name}_heat_maps/round_{comm_round}.png')
