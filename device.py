@@ -128,7 +128,7 @@ class Device():
                             self.args.dev_device,
                             self.args.train_verbose)
                 acc = self.eval_model_by_train(self.model)
-                if acc >= max_acc:
+                if acc > max_acc: # >= ?
                     max_model = copy_model(self.model, self.args.dev_device)
                     max_acc = acc
                     max_model_epoch = epoch + 1
@@ -307,6 +307,13 @@ class Device():
             
                 self.worker_to_model_sig[widx] = {'model_sig_row': wtx['model_sig_row'], 'model_sig_row_sig': wtx['model_sig_row_sig'], 'model_sig_col': wtx['model_sig_col'], 'model_sig_col_sig': wtx['model_sig_col_sig'], 'worker_rsa': worker_rsa}
 
+        # last global model's accuracy
+        if self.blockchain.get_last_block():
+            last_global_acc = self.eval_model_by_train(self.blockchain.get_last_block().global_model)
+        else:
+            last_global_acc = self.eval_model_by_train(self.init_global_model)
+        
+        diff_global_local = {}
         for widx, wtx in self._verified_worker_txs.items():
             worker_model = wtx['model']
             # calculate accuracy by validator's local dataset
@@ -318,11 +325,16 @@ class Device():
             #     self.worker_to_norm_global[widx] = self.calc_pearson_correlation_nns(self.init_global_model, worker_model)
             # self.worker_to_norm[widx] = self.calc_pearson_correlation_nns(self.model, worker_model)
             # self.worker_to_norm[widx] = get_gradient_norm(worker_model,self._train_loader,self.args.optimizer, self.args.lr,self.args.dev_device,self.args.train_verbose)
+            diff_global_local[widx] = self.worker_to_acc[widx] - last_global_acc
         # normalize the euclidean distance, and sort
         # self.worker_to_norm_global = {worker_idx: euc_dis / sum(self.worker_to_norm_global.values()) for worker_idx, euc_dis in self.worker_to_norm_global.items()}
         # self.worker_to_norm = {worker_idx: euc_dis / sum(self.worker_to_norm.values()) for worker_idx, euc_dis in self.worker_to_norm.items()}
         # self.worker_to_norm_global = dict(sorted(self.worker_to_norm_global.items(), key=lambda item: item[1]))
         # self.worker_to_norm = dict(sorted(self.worker_to_norm.items(), key=lambda item: item[1]))
+        
+        # normalize the diff_global_local, and sort
+        diff_global_local = {worker_idx: diff / sum(diff_global_local.values()) for worker_idx, diff in diff_global_local.items()}
+        diff_global_local = dict(sorted(diff_global_local.items(), key=lambda item: item[1]))
 
         if self.args.show_all_validation_performance:
             print(f"\nShowing validator {self.idx}'s validation performance against malicious workers out of total {len(self.worker_to_acc)} workers:")
