@@ -52,9 +52,20 @@ class Client():
         self.global_model = copy_model(init_global_model, args.dev_device)
         self.init_global_model = copy_model(init_global_model, args.dev_device)
     
+    def accs_decreasing(self, accs, last_n):
+        if len(accs) == 1:
+            os.exit("Invalid `last_n` specified.")
+        if len(accs) < last_n:
+            return False
+        for i in range(-last_n, -1):
+            if accs[i] <= accs[i + 1]:
+                return False
+        return True       
+    
     def model_learning_max(self, comm_round, logger):
 
         logger['global_test_acc'][comm_round][self.idx] = self.eval_model_by_global_test(self.model)
+        logger['global_model_sparsity'][comm_round][self.idx] = 1 - get_pruned_amount(self.model)
 
         print(f"\n---------- Worker:{self.idx} starts training ---------------------")
         
@@ -67,46 +78,52 @@ class Client():
             for name, param in self.model.named_parameters():
                 param.data.copy_(source_params[name].data)
         
-        max_epoch = self.args.epochs
-
-        # lazy worker
-        if self._is_malicious and self.args.attack_type == 3:
-            max_epoch = int(max_epoch * 0.1)
-
+        init_acc = self.eval_model_by_train(self.model)
         epoch = 0
-        max_model_epoch = epoch
+        
+        logger['lazy_worker'][comm_round][self.idx] = False
+        if self._is_malicious and self.args.attack_type == 1:
+            # skip training and poison local model on trainable weights before submission
+            self.poison_model(self.model)
+            poinsoned_acc = self.eval_model_by_train(self.model)
+            print(f'Poisoned accuracy: {poinsoned_acc}, decreased {init_acc - poinsoned_acc}.')
+            self.max_model_acc = poinsoned_acc
+        else:
+            
+            potential_lazy_worker = False
+            if self._is_malicious and self.args.attack_type == 3:
+                potential_lazy_worker = True
+                lazy_epochs = random.randint(0, 5)
+                print(f'Lazy worker {self.idx} will train with maximum epoches {lazy_epochs}.')
 
-        # init max_acc as the initial global model acc on local training set
-        max_acc = self.eval_model_by_train(self.model)
-        max_model = self.model
+            # train to max accuracy (stop when accuracy drops)
+            accs = [init_acc]
+            while not self.does_acc_drop(accs) and accs[-1] != 1.0:
+                last_local_model = copy_model(self.model, self.args.dev_device)
+                if potential_lazy_worker and epoch == lazy_epochs:
+                    # lazy worker
+                    logger['lazy_worker'][comm_round][self.idx] = True
+                    break
+                if self.args.train_verbose:
+                    print(f"Worker={self.idx}, epoch={epoch + 1}")
 
-        while epoch < max_epoch and max_acc != 1.0:
-            if self.args.train_verbose:
-                print(f"Worker={self.idx}, epoch={epoch + 1}")
+                util_train(self.model,
+                            self._train_loader,
+                            self.args.optimizer,
+                            self.args.lr,
+                            self.args.dev_device,
+                            self.args.train_verbose)
+                acc = self.eval_model_by_train(self.model)
+                accs.append(acc)
+                epoch += 1
 
-            util_train(self.model,
-                        self._train_loader,
-                        self.args.lr,
-                        self.args.dev_device,
-                        self.args.train_verbose)
-            acc = self.eval_model_by_train(self.model)
-            # print(epoch + 1, acc)
-            if acc >= max_acc:
-                # print(self.idx, "epoch", epoch + 1, acc)
-                max_model = copy_model(self.model, self.args.dev_device)
-                max_acc = acc
-                max_model_epoch = epoch + 1
+            self.max_model_acc = max(accs) # (accs[-2] for legitimate workers, or accs[-1] for lazy workers) or init_acc
+            self.model = last_local_model
 
-            epoch += 1
-
-        print(f"Worker {self.idx} trained for {epoch} epochs with max training acc {max_acc} arrived at epoch {max_model_epoch}.")
-        logger['local_max_epoch'][comm_round][self.idx] = max_model_epoch
-
-        self.model = max_model
-        self.max_model_acc = max_acc
+        print(f"Worker {self.idx} with max training acc {self.max_model_acc} arrived at epoch {epoch}.")
+        logger['local_max_epoch'][comm_round][self.idx] = epoch
 
         # self.save_model_weights_to_log(comm_round, max_model_epoch)
-        logger['global_model_sparsity'][comm_round][self.idx] = 1 - get_pruned_amount(self.model)
         logger['local_max_acc'][comm_round][self.idx] = self.max_model_acc
         logger['local_test_acc'][comm_round][self.idx] = self.eval_model_by_local_test(self.model)
 
@@ -143,10 +160,10 @@ class Client():
             model_acc = self.eval_model_by_train(pruned_model)
 
             # prune until the accuracy drop exceeds the threshold or below the target sparsity
-            if init_model_acc - model_acc > self.args.prune_acc_drop_threshold or 1 - to_prune_amount <= self.args.target_sparsity:
+            if init_model_acc - model_acc > self.args.acc_drop_threshold or 1 - to_prune_amount <= self.args.target_sparsity:
                 # revert to the last pruned model
                 # print("pruned amount", to_prune_amount, "target_sparsity", self.args.target_sparsity)
-                # print(f"init_model_acc - model_acc: {init_model_acc- model_acc} > self.args.prune_acc_drop_threshold: {self.args.prune_acc_drop_threshold}")
+                # print(f"init_model_acc - model_acc: {init_model_acc- model_acc} > self.args.acc_drop_threshold: {self.args.acc_drop_threshold}")
                 self.model = copy_model(last_pruned_model, self.args.dev_device)
                 self.max_model_acc = accs[-1]
                 break
@@ -237,15 +254,9 @@ class Client():
                 self.prune_rates.append(prune_rate)
             self.model = self.global_model
 
-        if self._is_malicious and self.args.attack_type == 1:
-            # skip training and poison local model on trainable weights before submission
-            print(f"\nPoisoning Model")
-            self.poison_model(self.model)
-            logger['local_max_acc'][comm_round][self.idx] = self.eval_model_by_train(self.model)
-        else:
-            print(f"\nTraining local model")
-            # self.train(self.elapsed_comm_rounds)
-            self.model_learning_max(comm_round, logger)
+        print(f"\nTraining local model")
+        # self.train(self.elapsed_comm_rounds)
+        self.model_learning_max(comm_round, logger)
 
         print(f"\nEvaluating Trained Model")
         metrics = self.eval(self.model)

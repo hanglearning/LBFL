@@ -171,6 +171,8 @@ if __name__ == '__main__':
     logger['local_max_acc'] = {r: {} for r in range(1, args.epochs + 1)}
     logger['local_test_acc'] = {r: {} for r in range(1, args.epochs + 1)}
 
+    logger["lazy_worker"] = {r: {} for r in range(1, args.epochs + 1)}
+    logger["local_max_epoch"] = {r: {} for r in range(1, args.epochs + 1)}
     # save args
     with open(f'{args.log_dir}/args.pickle', 'wb') as f:
         pickle.dump(args, f)
@@ -223,15 +225,11 @@ if __name__ == '__main__':
                     # for malicious user with model poisoning attack, skip training and poison
                     print(f"Malicious user {idx} is poisoning the model")
                     poison_model(train_model)
-                    w, loss = local_model.update_weights(
-                        model=train_model, epochs=0, device = device) # no train
-                elif args.attack_type == 3:
-                    # lazy attack
-                    w, loss = local_model.update_weights(
-                    model=train_model, epochs=int(args.local_ep * 0.1), device = device)
+                    w, loss = local_model.update_weights(widx = idx,
+                        model=train_model, epochs=0, device = device, comm_round = epoch, logger = logger) # no train
             else:
-                w, loss = local_model.update_weights(
-                    model=train_model, epochs=args.local_ep, device = device)
+                w, loss = local_model.update_weights(widx = idx,
+                    model=train_model, epochs=args.local_ep, device = device, comm_round = epoch, logger = logger)
             #model used for test
             temp_model = copy.deepcopy(global_model)
             temp_model.load_state_dict(w)

@@ -77,7 +77,17 @@ class Device():
         self.public_key = None
         self.generate_rsa_key()
     
-    ''' Workers' Method '''        
+    ''' Workers' Method '''
+
+    def accs_decreasing(self, accs, last_n):
+        if last_n == 1:
+            sys.exit("Invalid `last_n` specified.")
+        if len(accs) <= last_n: # need = because otherwise device may not train at all, i.e., starting with the first last_n rounds consecutively decreasing. How about decreasing accuracy during the starting last_n+ rounds? Worker gives up training and wait for the new global model
+            return False
+        for i in range(-last_n, -1):
+            if accs[i] <= accs[i + 1]:
+                return False
+        return True   
 
     def model_learning_max(self, comm_round, logger):
 
@@ -96,28 +106,30 @@ class Device():
             for name, param in self.model.named_parameters():
                 param.data.copy_(source_params[name].data)
 
-        max_epoch = self.args.epochs
+        init_acc = self.eval_model_by_train(self.model)
+        epoch = 0
 
-        # lazy worker
-        if self._is_malicious and self.args.attack_type == 3:
-            max_epoch = random.randint(0, int(max_epoch * 0.1))
-            # max_epoch = int(max_epoch * self.args.lazy_variance)
-            print(f'Lazy worker {self.idx} will train with max epoches {max_epoch}.')
-
-        # init max_acc as the initial global model acc on local training set
-        max_acc = self.eval_model_by_train(self.model)
-
+        logger['lazy_worker'][comm_round][self.idx] = False
         if self._is_malicious and self.args.attack_type == 1:
             # skip training and poison local model on trainable weights before submission
             self.poison_model(self.model)
             poinsoned_acc = self.eval_model_by_train(self.model)
-            print(f'Poisoned accuracy: {poinsoned_acc}, decreased {max_acc - poinsoned_acc}.')
+            print(f'Poisoned accuracy: {poinsoned_acc}, decreased {init_acc - poinsoned_acc}.')
             self.max_model_acc = poinsoned_acc
         else:
-            max_model = copy_model(self.model, self.args.dev_device)
-            max_model_epoch = epoch = 0
-            # train to max accuracy
-            while epoch < max_epoch and max_acc != 1.0:
+            max_model = self.model
+            max_model_epoch = epoch # = 0
+            if self._is_malicious and self.args.attack_type == 3:
+                lazy_epochs = random.randint(1, 5) # 0 epoch is easy to identify through comparing with the last global model
+                print(f'Potential lazy worker {self.idx} will train with maximum epoches {lazy_epochs}.')
+
+            # train to max accuracy (stop when accuracy drops)
+            accs = [init_acc]
+            while not self.accs_decreasing(accs, self.args.n_decreasing) and accs[-1] != 1.0 and epoch != self.args.epochs:
+                if self._is_malicious and self.args.attack_type == 3 and epoch == lazy_epochs:
+                    # lazy worker
+                    potential_lazy_model = copy_model(self.model, self.args.dev_device)
+                    potential_lazy_acc = self.eval_model_by_train(potential_lazy_model)
                 if self.args.train_verbose:
                     print(f"Worker={self.idx}, epoch={epoch + 1}")
 
@@ -128,20 +140,28 @@ class Device():
                             self.args.dev_device,
                             self.args.train_verbose)
                 acc = self.eval_model_by_train(self.model)
-                if acc > max_acc: # >= ?
+                accs.append(acc)
+                if accs[-1] > accs[-2]:
                     max_model = copy_model(self.model, self.args.dev_device)
-                    max_acc = acc
                     max_model_epoch = epoch + 1
-
+                    self.max_model_acc = acc
                 epoch += 1
-
-
-            print(f"Worker {self.idx} with max training acc {max_acc} arrived at epoch {max_model_epoch}.")
-            logger['local_max_epoch'][comm_round][self.idx] = max_model_epoch
+            
+            if self._is_malicious and self.args.attack_type == 3 and lazy_epochs < epoch // 2 and potential_lazy_acc + self.args.acc_drop_threshold < self.max_model_acc:
+                print(f"Worker {self.idx} is lazy on training during this comm round.")
+                print(f"It could reach accuracy {self.max_model_acc} at epoch {epoch}.")
+                logger['lazy_worker'][comm_round][self.idx] = True
+                max_model = potential_lazy_model
+                max_model_epoch = lazy_epochs
+                self.max_model_acc = potential_lazy_acc
+            else:
+                print(f"Worker {self.idx} is actually not lazy on training this round.")
 
             self.model = max_model
-            self.max_model_acc = max_acc
 
+        print(f"Worker {self.idx} with max training acc {self.max_model_acc} arrived at epoch {max_model_epoch}.")
+        logger['local_max_epoch'][comm_round][self.idx] = max_model_epoch
+                
         logger['local_max_acc'][comm_round][self.idx] = self.max_model_acc
         logger['local_test_acc'][comm_round][self.idx] = self.eval_model_by_local_test(self.model)
 
@@ -184,7 +204,7 @@ class Device():
             model_acc = self.eval_model_by_train(pruned_model)
 
             # prune until the accuracy drop exceeds the threshold or below the target sparsity
-            if init_model_acc - model_acc > self.args.prune_acc_drop_threshold or 1 - to_prune_amount <= self.args.target_sparsity:
+            if init_model_acc - model_acc > self.args.acc_drop_threshold or 1 - to_prune_amount <= self.args.target_sparsity:
                 # revert to the last pruned model
                 self.model = copy_model(last_pruned_model, self.args.dev_device)
                 self.max_model_acc = accs[-1]
@@ -202,6 +222,7 @@ class Device():
         print(f"Pruned model before and after accuracy: {init_model_acc:.2f}, {after_pruning_acc:.2f}")
         print(f"Pruned amount: {after_pruned_ratio - init_pruned_ratio:.2f}")
 
+        logger['worker_pruned_ratio'][comm_round][self.idx] = after_pruned_ratio - init_pruned_ratio
         logger['after_prune_sparsity'][comm_round][self.idx] = 1 - after_pruned_ratio
         logger['after_prune_acc'][comm_round][self.idx] = after_pruning_acc
         logger['after_prune_local_test_acc'][comm_round][self.idx] = self.eval_model_by_local_test(self.model)
@@ -289,6 +310,13 @@ class Device():
 
     def validate_models(self, idx_to_device):
 
+        # used to compare with the last global model
+        if self.blockchain.get_last_block():
+            last_global_model = self.blockchain.get_last_block().global_model
+        else:
+            last_global_model = self.init_global_model
+        last_global_layer_to_model_sig_row, last_global_layer_to_model_sig_col = sum_over_model_params(last_global_model)
+
         # validate model siganture
         for widx, wtx in self._verified_worker_txs.items():
             worker_model = wtx['model']
@@ -297,45 +325,28 @@ class Device():
             worker_rsa = wtx['rsa_pub_key']
 
             worker_layer_to_model_sig_row, worker_layer_to_model_sig_col = sum_over_model_params(worker_model)
-            if self.compare_dicts_of_tensors(wtx['model_sig_row'], worker_layer_to_model_sig_row)\
+            
+            validity = False
+            # compare with the last global model
+            if self.compare_dicts_of_tensors(wtx['model_sig_row'], last_global_layer_to_model_sig_row)\
+                  and self.compare_dicts_of_tensors(wtx['model_sig_col'], last_global_layer_to_model_sig_col):
+                print(f"Worker {widx}'s local model is identical to the latest global model.")
+            elif self.compare_dicts_of_tensors(wtx['model_sig_row'], worker_layer_to_model_sig_row)\
                   and self.compare_dicts_of_tensors(wtx['model_sig_col'], worker_layer_to_model_sig_col)\
                   and self.verify_msg(wtx['model_sig_row'], worker_model_sig_row_sig, worker_rsa['pub_key'], worker_rsa['modulus'])\
                   and self.verify_msg(wtx['model_sig_col'], worker_model_sig_col_sig, worker_rsa['pub_key'], worker_rsa['modulus']):
-                
-                if self.args.validation_verbose:
-                    print(f"Worker {widx} has valid model signature.")
+                validity = True
+                print(f"Worker {widx} has valid model signature.")
+            # else: # not valid
             
-                self.worker_to_model_sig[widx] = {'model_sig_row': wtx['model_sig_row'], 'model_sig_row_sig': wtx['model_sig_row_sig'], 'model_sig_col': wtx['model_sig_col'], 'model_sig_col_sig': wtx['model_sig_col_sig'], 'worker_rsa': worker_rsa}
+            self.worker_to_model_sig[widx] = {'model_sig_row': wtx['model_sig_row'], 'model_sig_row_sig': wtx['model_sig_row_sig'], 'model_sig_col': wtx['model_sig_col'], 'model_sig_col_sig': wtx['model_sig_col_sig'], 'validity': validity, 'worker_rsa': worker_rsa}
 
-        # last global model's accuracy
-        if self.blockchain.get_last_block():
-            last_global_acc = self.eval_model_by_train(self.blockchain.get_last_block().global_model)
-        else:
-            last_global_acc = self.eval_model_by_train(self.init_global_model)
-        
-        diff_global_local = {}
         for widx, wtx in self._verified_worker_txs.items():
             worker_model = wtx['model']
             # calculate accuracy by validator's local dataset
-            self.worker_to_acc[widx] = self.eval_model_by_train(worker_model)
-            # calculate euclidean distance
-            # if self.blockchain.get_last_block():
-            #     self.worker_to_norm_global[widx] = self.calc_pearson_correlation_nns(self.blockchain.get_last_block().global_model, worker_model)
-            # else:
-            #     self.worker_to_norm_global[widx] = self.calc_pearson_correlation_nns(self.init_global_model, worker_model)
-            # self.worker_to_norm[widx] = self.calc_pearson_correlation_nns(self.model, worker_model)
-            # self.worker_to_norm[widx] = get_gradient_norm(worker_model,self._train_loader,self.args.optimizer, self.args.lr,self.args.dev_device,self.args.train_verbose)
-            diff_global_local[widx] = self.worker_to_acc[widx] - last_global_acc
-        # normalize the euclidean distance, and sort
-        # self.worker_to_norm_global = {worker_idx: euc_dis / sum(self.worker_to_norm_global.values()) for worker_idx, euc_dis in self.worker_to_norm_global.items()}
-        # self.worker_to_norm = {worker_idx: euc_dis / sum(self.worker_to_norm.values()) for worker_idx, euc_dis in self.worker_to_norm.items()}
-        # self.worker_to_norm_global = dict(sorted(self.worker_to_norm_global.items(), key=lambda item: item[1]))
-        # self.worker_to_norm = dict(sorted(self.worker_to_norm.items(), key=lambda item: item[1]))
-        
-        # normalize the diff_global_local, and sort
-        diff_global_local = {worker_idx: diff / sum(diff_global_local.values()) for worker_idx, diff in diff_global_local.items()}
-        diff_global_local = dict(sorted(diff_global_local.items(), key=lambda item: item[1]))
-
+            if self.worker_to_model_sig[widx]['validity']:
+                self.worker_to_acc[widx] = self.eval_model_by_train(worker_model)
+            
         if self.args.show_all_validation_performance:
             print(f"\nShowing validator {self.idx}'s validation performance against malicious workers out of total {len(self.worker_to_acc)} workers:")
             i = 1
@@ -355,8 +366,6 @@ class Device():
             if self.args.attack_type == 1:
                 # lazy validator doesn't inverse the calculations as its intention is to maximize the rewards while being lazy, but noise attackers tend to sabotage the validation process
                 self.worker_to_acc = {worker_idx: 1 - acc for worker_idx, acc in self.worker_to_acc.items()}
-                # self.worker_to_norm = {worker_idx: 1 - euc_dis for worker_idx, euc_dis in self.worker_to_norm.items()}
-                self.worker_to_norm_global = {worker_idx: 1 - euc_dis for worker_idx, euc_dis in self.worker_to_norm.items()}
                 print(f"Malicious validator {self.idx} has inversed accuracy and euclidean distance calculations.")
             # malicious validator always assigns itself the maximum accuracy (1.0)
             self.worker_to_acc[self.idx] = 1.0
@@ -366,8 +375,7 @@ class Device():
         validator_tx = {
             'validator_idx' : self.idx,
             'rsa_pub_key': self.return_rsa_pub_key(),
-            'worker_to_acc' : self.worker_to_acc,
-            'worker_to_norm': self.worker_to_norm_global,
+            'worker_to_acc' : self.worker_to_acc
         }
         validator_tx['tx_sig'] = self.sign_msg(str(validator_tx))
         self._validator_tx = validator_tx

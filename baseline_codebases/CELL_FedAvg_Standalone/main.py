@@ -52,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--optimizer', type=str, default="Adam", help="SGD|Adam")
     parser.add_argument('--n_samples', type=int, default=40)
     parser.add_argument('--n_classes', type=int, default=3)
     parser.add_argument('--eita', type=float, default=0.5,
@@ -71,7 +72,7 @@ if __name__ == "__main__":
     parser.add_argument('--n_malicious', type=int, default=0)
     parser.add_argument('--noise_variance', type=int, default=1, help="noise variance level of the injected Gaussian Noise")
 
-    parser.add_argument('--prune_acc_drop_threshold', type=float, default=0.05, help='if the accuracy drop is larger than this threshold, stop prunning')
+    parser.add_argument('--acc_drop_threshold', type=float, default=0.05, help='if the accuracy drop is larger than this threshold, stop prunning')
     parser.add_argument('--target_sparsity', type=float, default=0.1, help='target sparsity for pruning, stop pruning if below this threshold')
 
     # Run Type
@@ -166,6 +167,8 @@ if __name__ == "__main__":
     logger['after_prune_acc'] = {r: {} for r in range(1, args.rounds + 1)}
     logger['after_prune_local_test_acc'] = {r: {} for r in range(1, args.rounds + 1)}
     logger['after_prune_global_test_acc'] = {r: {} for r in range(1, args.rounds + 1)}
+
+    logger["lazy_worker"] = {r: {} for r in range(1, args.rounds + 1)}
 
     # save args
     with open(f'{args.log_dir}/args.pickle', 'wb') as f:

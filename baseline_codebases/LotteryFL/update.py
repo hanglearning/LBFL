@@ -6,9 +6,12 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+import os
 
 from baseline_codebases.LotteryFL.lotteryfl_utils import *
 from copy import deepcopy
+
+import random
 
 class DatasetSplit(Dataset):
     """An abstract Dataset class wrapped around Pytorch Dataset class.
@@ -65,8 +68,18 @@ class LocalUpdate(object):
         testloader = DataLoader(DatasetSplit(dataset, idxs_test),
                                 batch_size=self.args.batch_size, shuffle=False)
         return trainloader, validloader, testloader
+    
+    def accs_decreasing(self, accs, last_n):
+        if len(accs) == 1:
+            os.exit("Invalid `last_n` specified.")
+        if len(accs) < last_n:
+            return False
+        for i in range(-last_n, -1):
+            if accs[i] <= accs[i + 1]:
+                return False
+        return True
 
-    def update_weights(self, model, epochs, device):
+    def update_weights(self, widx, model, epochs, device, comm_round, logger):
         EPS = 1e-6
         # Set mode to train model
         model.train()
@@ -80,12 +93,27 @@ class LocalUpdate(object):
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                          weight_decay=1e-4)
         iter = 0
-        max_model = model
-        max_acc = test_by_data_set(model, self.trainloader, device)['MulticlassAccuracy'][0]
+        init_acc = test_by_data_set(model, self.trainloader, device)['MulticlassAccuracy'][0]
 
         # adapt to max training framework
 
-        while iter < epochs:
+        if epochs == 0:
+            return model.state_dict(), 0 # noise attack worker no training
+
+        logger['lazy_worker'][comm_round + 1][widx] = False
+        potential_lazy_worker = False
+        if self.args.attack_type == 3:
+            potential_lazy_worker = True
+            lazy_epochs = random.randint(0, 5)
+            print(f'Lazy worker {widx} will train with maximum epoches {lazy_epochs}.')
+
+        accs = [init_acc]
+        while not self.does_acc_drop(accs) and accs[-1] != 1.0:
+            last_local_model = copy.deepcopy(model)
+            if potential_lazy_worker and iter == lazy_epochs:
+                logger['lazy_worker'][comm_round + 1][widx] = True
+                # lazy worker
+                break
             print("epoch", iter + 1, "\n")
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
@@ -117,17 +145,13 @@ class LocalUpdate(object):
                 batch_loss.append(loss.item())
             
             acc = test_by_data_set(model, self.trainloader, device)['MulticlassAccuracy'][0]
-            if acc >= max_acc:
-                # print(self.idx, "epoch", epoch + 1, acc)
-                max_model = copy.deepcopy(model)
-                max_acc = acc
+            accs.append(acc)
             iter += 1
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
-            if max_acc == 1.0: break
 
-        if epochs == 0:
-            return model.state_dict(), 0
-        return max_model.state_dict(), sum(epoch_loss) / len(epoch_loss)
+            logger['local_max_epoch'][comm_round + 1][widx] = iter
+
+        return last_local_model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
     def inference(self, model):
         """ Returns the inference accuracy and loss.
