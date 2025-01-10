@@ -79,16 +79,6 @@ class Device():
     
     ''' Workers' Method '''
 
-    def accs_decreasing(self, accs, last_n):
-        if last_n == 1:
-            sys.exit("Invalid `last_n` specified.")
-        if len(accs) <= last_n: # need = because otherwise device may not train at all, i.e., starting with the first last_n rounds consecutively decreasing. How about decreasing accuracy during the starting last_n+ rounds? Worker gives up training and wait for the new global model
-            return False
-        for i in range(-last_n, -1):
-            if accs[i] <= accs[i + 1]:
-                return False
-        return True   
-
     def model_learning_max(self, comm_round, logger):
 
         produce_mask_from_model_in_place(self.model)
@@ -123,11 +113,11 @@ class Device():
                 lazy_epochs = random.randint(1, 5) # 0 epoch is easy to identify through comparing with the last global model
                 print(f'Potential lazy worker {self.idx} will train with maximum epoches {lazy_epochs}.')
 
-            # train to max accuracy (stop when accuracy drops)
+            # train to max accuracy (stop when converge or reach max epochs)
             accs = [init_acc]
-            while not self.accs_decreasing(accs, self.args.patience) and accs[-1] != 1.0 and epoch != self.args.epochs:
+            while accs[-1] != 1.0 and epoch != self.args.epochs:
                 if self._is_malicious and self.args.attack_type == 3 and epoch == lazy_epochs:
-                    # lazy worker
+                    # potential lazy worker
                     potential_lazy_model = copy_model(self.model, self.args.dev_device)
                     potential_lazy_acc = self.eval_model_by_train(potential_lazy_model)
                 if self.args.train_verbose:
@@ -141,13 +131,28 @@ class Device():
                             self.args.train_verbose)
                 acc = self.eval_model_by_train(self.model)
                 accs.append(acc)
-                if accs[-1] > accs[-2]:
-                    max_model = copy_model(self.model, self.args.dev_device)
-                    max_model_epoch = epoch + 1
-                    self.max_model_acc = acc
+
+                # Convergence check
+                if len(accs) > self.args.patience:
+                    recent_accs = accs[-self.args.patience:]
+                    if all(abs(recent_accs[i] - recent_accs[i - 1]) < self.args.acc_tolerance for i in range(1, len(recent_accs))):
+                        print(f"Worker {self.idx} training has converged at epoch {epoch + 1}.")
+                        max_model = copy_model(self.model, self.args.dev_device)
+                        self.max_model_acc = accs[-1]
+                        epoch += 1
+                        max_model_epoch = epoch
+                        break
+                    
                 epoch += 1
             
-            if self._is_malicious and self.args.attack_type == 3:
+            if epoch == self.args.epochs:
+                print(f"Worker {self.idx} training has reached max epochs {self.args.epochs}.")
+                max_model = copy_model(self.model, self.args.dev_device)
+                max_model_epoch = epoch
+                self.max_model_acc = accs[-1]
+            
+            # check if the worker is lazy
+            if self._is_malicious and self.args.attack_type == 3 and epoch > lazy_epochs:
                 max_model_epoch = lazy_epochs
                 self.max_model_acc = potential_lazy_acc
                 max_model = potential_lazy_model

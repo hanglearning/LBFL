@@ -72,7 +72,8 @@ parser.add_argument('--optimizer', type=str, default="Adam", help="SGD|Adam")
 parser.add_argument('--n_samples', type=int, default=20)
 parser.add_argument('--n_classes', type=int, default=3)
 parser.add_argument('--n_malicious', type=int, default=8, help="number of malicious nodes in the network")
-parser.add_argument('--patience', type=int, default=3, help="number of consecutive rounds of accuracy decrease to stop training to get the model with the max accuracy")
+parser.add_argument('--acc_tolerance', type=float, default=0.01, help="threshold to check for convergence and stop training")
+parser.add_argument('--patience', type=int, default=5, help="number of consecutive rounds of accuracy decrease to stop training to get the model with the max accuracy")
 
 ####################### validation and rewards setting #######################
 parser.add_argument('--pass_all_models', type=int, default=0, help='turn off validation and pass all models, used for debug or create baselines')
@@ -87,7 +88,7 @@ parser.add_argument('--rewind', type=int, default=1, help="reinit ticket model p
 parser.add_argument('--target_sparsity', type=float, default=0.1, help='target sparsity for pruning, stop pruning if below this threshold')
 parser.add_argument('--max_prune_step', type=float, default=0.05, help='max increment of pruning step')
 parser.add_argument('--acc_drop_threshold', type=float, default=0.05, help='if the accuracy drop is larger than this threshold, stop prunning; also used to determine lazy worker based on accuracy')
-parser.add_argument('--worker_prune_acc_trigger', type=float, default=0.6, help='must achieve this accuracy to trigger worker to post prune its local model')
+parser.add_argument('--worker_prune_acc_trigger', type=float, default=0.8, help='must achieve this accuracy to trigger worker to post prune its local model')
 # parser.add_argument('--validator_prune_acc_trigger', type=float, default=0.8, help='must achieve this accuracy to trigger validator to post prune the global model')
 
 
