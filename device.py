@@ -114,8 +114,8 @@ class Device():
                 print(f'Potential lazy worker {self.idx} will train with maximum epoches {lazy_epochs}.')
 
             # train to max accuracy (stop when converge or reach max epochs)
-            accs = [init_acc]
-            while accs[-1] != 1.0 and epoch != self.args.epochs:
+            self.max_model_acc = init_acc
+            while self.max_model_acc != 1.0 and epoch != self.args.epochs:
                 if self._is_malicious and self.args.attack_type == 3 and epoch == lazy_epochs:
                     # potential lazy worker
                     potential_lazy_model = copy_model(self.model, self.args.dev_device)
@@ -130,26 +130,12 @@ class Device():
                             self.args.dev_device,
                             self.args.train_verbose)
                 acc = self.eval_model_by_train(self.model)
-                accs.append(acc)
-
-                # Convergence check
-                if len(accs) > self.args.patience:
-                    recent_accs = accs[-self.args.patience:]
-                    if all(abs(recent_accs[i] - recent_accs[i - 1]) < self.args.acc_tolerance for i in range(1, len(recent_accs))):
-                        print(f"Worker {self.idx} training has converged at epoch {epoch + 1}.")
-                        max_model = copy_model(self.model, self.args.dev_device)
-                        self.max_model_acc = accs[-1]
-                        epoch += 1
-                        max_model_epoch = epoch
-                        break
+                if acc >= self.max_model_acc:
+                    self.max_model_acc = acc
+                    max_model = copy_model(self.model, self.args.dev_device)
+                    max_model_epoch = epoch + 1
                     
                 epoch += 1
-            
-            if epoch == self.args.epochs:
-                print(f"Worker {self.idx} training has reached max epochs {self.args.epochs}.")
-                max_model = copy_model(self.model, self.args.dev_device)
-                max_model_epoch = epoch
-                self.max_model_acc = accs[-1]
             
             # check if the worker is lazy
             if self._is_malicious and self.args.attack_type == 3 and epoch > lazy_epochs:
